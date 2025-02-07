@@ -1,0 +1,638 @@
+---
+title: 'Homework 2022-23: COVID data'
+author: "Oguz Gurler and Dylan Aouidef"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_caption: yes
+    keep_md: yes
+    number_sections: no
+    code_folding: hide
+    toc: yes
+  pdf_document:
+    toc: yes
+  html_notebook:
+    code_folding: none
+    number_sections: yes
+    toc: yes
+subtitle: 'Deadline: 2022-11-15'
+params:
+  datapath: ''
+---
+
+```{r install_load_packages, echo=FALSE, warning=FALSE, message=FALSE}
+pacman::p_load(tidyverse) # metapackage
+pacman::p_load(broom)
+pacman::p_load(readr)
+pacman::p_load(GGally)
+pacman::p_load(ggforce)
+pacman::p_load(ggmosaic)
+pacman::p_load(MASS)
+pacman::p_load(vcd)
+pacman::p_load(glue)
+pacman::p_load(here)
+pacman::p_load(patchwork)
+pacman::p_load(magrittr)
+pacman::p_load(skimr)
+pacman::p_load(fontawesome)
+pacman::p_load(httr)
+pacman::p_load(prophet)  # time series prediction/forecasting  by facebook
+pacman::p_load(data.table)
+pacman::p_load(lubridate)
+pacman::p_load(tsibble)
+```
+
+```{r set-knit, echo=FALSE, eval=TRUE}
+knitr::opts_chunk$set(
+  echo=FALSE,
+  eval=TRUE,
+  message=FALSE,
+  warning = FALSE
+  )
+
+old_theme <- theme_set(theme_minimal(base_size=14,
+                                     base_family = "Helvetica"))
+```
+
+------------------------------------------------------------------------
+
+# PCA on demographic columns from `owid-covid-data.csv`
+
+```{r, echo=TRUE}
+fpath <- '/Users/dylan/Downloads/owid-covid-data.csv' #tune this
+
+if (! file.exists(fpath)) {
+  r <- GET('https://www.dropbox.com/s/f8cmgeo58mgdud4/owid-covid-data.csv?raw=1')
+  stop_for_status(r$status_code)
+  bin <- content(r, "raw")
+  writeBin(bin, fpath)
+  rm(bin)
+} else {
+  cat(paste(fpath, 'already exists!'))
+}
+
+owid_tb <-  readr::read_csv(fpath)
+
+owid_tb %>%
+  glimpse()
+```
+
+Project `owid_tb` on demographic columns, eliminate duplicate rows, so that you obtain one row per geographical entity. Call the resulting tibble `demog_tb`
+
+```{r}
+demog_tb <- owid_tb %>%
+  dplyr::select(1:3,49:63) %>%
+  distinct()
+
+demog_tb
+```
+
+Describe each column of `demog_tb` (univariate numerical summary, univariate graphical summary)
+
+```{r}
+demog_tb |>
+  dplyr::select(iso_code,continent,location,where(is.numeric)) |>
+  skimr::skim() |>
+  arrange(desc(complete_rate)) |>
+  DT::datatable(
+  extensions=c('Buttons','ColReorder','FixedColumns','Responsive'),options=list(
+    dom='Bfrtip',
+    buttons=c('csv','pdf','print'),
+    colReorder=TRUE,
+    dom='t',
+    scrollX=TRUE,
+    fixedColumns=list(leftColumns=3,rightColumns=1)))
+```
+
+```{r}
+demog_tb %>%
+  dplyr::select(where(is.numeric)) %>%
+  pivot_longer(
+    cols=everything(),
+    names_to="var",
+    values_to="val",
+    ) %>%
+  ggplot()+
+  aes(x=val)+
+  facet_wrap(~var,scales="free_x")+
+  geom_histogram(aes(y=..density..),bins=30,na.rm=T)+
+  scale_x_log10()+
+  xlab("")+
+  ggtitle("Univariate graphical summary")
+```
+
+Cleanup `demog_tb` (handle NAs) so that the resulting tibble can undergo Principle Component Analysis. Call the cleaned version of `demog_tb`, `demog_tb_c`
+
+```{r}
+liste <- c("North Korea","Syria","Scotland","England","Wales","Northern Ireland","Kosovo","Taiwan","Hong Kong","South Sudan")
+
+demog_tb_c <- demog_tb %>%
+  filter(nchar(iso_code)<4,!(location %in% liste),population>1000000) %>%
+  arrange((desc(population)))
+
+demog_tb_c
+```
+
+```{r}
+library(zoo)
+demog_tb_c <- na.locf((demog_tb_c))
+demog_tb_c
+```
+
+```{r}
+demog_tb_c %>%
+  summarise(across(everything(),~sum(is.na(.)))) %>%
+  pivot_longer(cols=everything(),
+               names_to="Column",
+               values_to = "#NA") %>%
+  arrange(desc('#NA'), Column)
+```
+
+There are no missing data in this dataset.
+
+-   Perform PCA on `demog_tb_c`
+-   Visualize the outputs of PCA
+-   Comment
+
+```{r}
+pca_1 <- demog_tb_c %>% 
+  dplyr::select(where(is.numeric)) %>%
+  prcomp(scale=TRUE)
+
+pca_1
+```
+
+```{r}
+library(factoextra)
+eig.val <- get_eigenvalue(pca_1)
+eig.val
+```
+
+```{r}
+fviz_screeplot(pca_1, ncp = 15, addlabels=TRUE) + theme_classic()
+```
+
+We decide to keep the first 4 principal components which represent 73% of the variance. It is an acceptable percentage.
+
+```{r}
+var <- get_pca_var(pca_1)
+var
+```
+
+```{r}
+# Coordinates
+head(var$coord)
+```
+
+```{r}
+# Cos2: representation quality
+head(var$cos2)
+```
+
+```{r}
+# Contributions to Principal Components
+head(var$contrib)
+```
+
+```{r}
+##Positively correlated variables are grouped together.
+#Variables that are far from the origin are well represented by PCA.
+
+fviz_pca_var(pca_1, col.var = "black")
+```
+
+```{r}
+#Visualization of the quality of representation of the variables
+
+library("corrplot")
+corrplot(var$cos2, is.corr=FALSE)
+```
+
+```{r}
+fviz_pca_var(pca_1, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE 
+             )
+```
+
+```{r}
+#The variables that contribute a lot to the first 2 components are the most important
+
+corrplot(var$contrib, is.corr=FALSE)    
+```
+
+```{r}
+#We draw the barplot of the first 10 variables that contribute the most to the first 2 components
+#We do the same work for the 2 components at the same time
+
+fviz_contrib(pca_1, choice = "var", axes = 1, top = 10)
+fviz_contrib(pca_1, choice = "var", axes = 2, top = 10)
+fviz_contrib(pca_1, choice = "var", axes = 1:2, top = 10)
+
+```
+
+```{r}
+#This confirms our results
+
+fviz_pca_var(pca_1,
+             col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     
+             )
+```
+
+```{r}
+#We do the same work for individuals (countries)
+
+ind <- get_pca_ind(pca_1)
+ind
+```
+
+```{r}
+#Remember that the countries are ranked in descending order according to population.
+
+fviz_pca_ind (pca_1, col.ind = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE 
+             )
+```
+
+```{r}
+fviz_pca_ind (pca_1, col.ind = "contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE 
+             )
+```
+
+```{r}
+#A country that is on the same side of a variable has a high value for that variable
+
+fviz_pca_biplot(pca_1, repel = TRUE,
+                col.var = "#2E9FDF", 
+                col.ind = "#696969"  
+                )
+```
+
+```{r}
+fviz_pca_var(pca_1,
+             col.var = "contrib", 
+             gradient.cols = c("#0066CC", "#33FF00", "#330000"),
+             repel = TRUE, axes=c(2,3)     
+             )
+```
+
+```{r}
+fviz_pca_biplot(pca_1, repel = TRUE,
+                col.var = "#2E9FDF", 
+                col.ind = "#696969",axes=c(2,3)  
+                )
+```
+
+-   Perform hierachical clustering of `demog_tb_c` projected on the most interesting principal components
+-   Visualize and comment clustering
+
+```{r}
+library(FactoMineR)
+d <- demog_tb_c %>%
+  dplyr::select(where(is.numeric))
+
+#Hierarchical clustering on the first 4 principal components
+
+pca_2 <- PCA(d, ncp = 4, graph = FALSE)
+hc <- HCPC(pca_2, graph = FALSE)
+
+pca_2
+hc
+```
+
+```{r}
+#The dendrogram proposes 3 groups for the countries
+
+fviz_dend(hc, 
+          cex = 0.3,                    
+          palette = "jco",               
+          rect = TRUE, rect_fill = TRUE, 
+          rect_border = "jco",           
+          labels_track_height = 0.8     
+          )
+```
+
+```{r}
+fviz_cluster(hc,
+             repel = TRUE,            
+             show.clust.cent = TRUE, 
+             palette = "jco",         
+             ggtheme = theme_minimal(),
+             main = "Factor map"
+             )
+```
+
+```{r}
+# Principal components + tree
+
+plot(hc, choice = "3D.map")
+```
+
+```{r}
+#Indicates to which cluster a country belongs
+
+hc$data.clust
+```
+
+```{r}
+#Shows which variables best describe each cluster
+
+hc$desc.var$quanti
+```
+
+```{r}
+#Main axes associated with clusters
+
+hc$desc.axes$quanti
+```
+
+```{r}
+#Represents the 5 countries closest to the center of the cluster
+#These are the representative countries for each group
+#The distance between each country and the center of the group is provided.
+
+hc$desc.ind$para
+```
+
+------------------------------------------------------------------------
+
+# Regression
+
+Project `owid_tb` on pandemic columns (keeping enough information to connect rows with geographical entities).
+
+Call the resulting tibble `pandemic_tb`. It may be worth transforming `pandemic_tb` into a `tsibble` (time series tibble), with index `date` and key `iso_code`.
+
+```{r, echo=FALSE}
+pandemic_tb <- owid_tb  %>% 
+   dplyr::select(1, 4:34)
+
+fr_tb <- pandemic_tb  %>% 
+  filter(iso_code=='FRA') %>% 
+  as_tsibble(index=date) 
+
+de_tb <- pandemic_tb %>%
+  filter(iso_code == "DEU") %>%
+  as_tsibble(index = date)
+
+
+we_tb <- pandemic_tb %>%
+  filter(iso_code %in% 
+  c("DEU", "FRA", "ITA", "BEL", "GBR", "ESP", "DNK", "SWE", "NLD", "PRT")) %>%
+  as_tsibble(key=iso_code, index = date)
+
+pandemic_tb
+fr_tb
+de_tb
+we_tb
+
+```
+
+```{r, echo=FALSE}
+ p <- pandemic_tb %>%
+  filter(iso_code == "PRT") %>%
+  as_tsibble(index = date) %>% 
+  ggplot() +
+   aes(x=date) + 
+   geom_point(aes(y=new_deaths_smoothed_per_million), size=.5, colour="blue") +
+   geom_point(aes(y=weekly_icu_admissions_per_million), size=.5, colour="red") +
+   geom_point(aes(y=weekly_hosp_admissions_per_million), size=.5, colour="green") +
+   geom_point(aes(y=new_cases_smoothed_per_million), size=.5, colour="black") +
+   scale_y_log10()
+p
+```
+
+```{r, echo=FALSE, fig.cap="Green=cases, Red=Hosp. admissions, Blue=ICU admissions, Black=Deaths"}
+we_tb %>% 
+  filter(iso_code %in% c("DNK", "FRA")) %>%
+  ggplot() +
+  aes(x = date) +
+  geom_point(aes(y = new_deaths_smoothed_per_million, shape=iso_code), size = .75, colour="black") +
+  geom_point(aes(y = weekly_icu_admissions_per_million, shape=iso_code), size = .75, colour="blue") +
+  geom_point(aes(y = weekly_hosp_admissions_per_million, shape=iso_code), size = .75, colour="red") +
+  geom_point(aes(y = new_cases_smoothed_per_million, shape=iso_code), size = .75, colour="green") +
+  xlab("Time") +
+  ylab("Cases, Hosp. Admissions, ICU Admissions, Deaths") +
+  scale_y_log10() +
+  ggtitle("Covid Pandemic", 
+          subtitle="Denmark and France" 
+          )
+```
+
+Perform "lagged regression" between response variable `new_deaths_per_million` and the following explanatory variables : `new_cases_per_million`, `new_cases_smoothed_per_million`, `weekly_hosp_admissions_per_million`, `weekly_icu_admissions_per_million`
+
+```{r}
+start_date <- as_date("2021-12-05")
+end_date <- as_date("2022-11-15")
+Delta <- 25
+X <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z <- 1:Delta %>%
+  map_dfc(~ lag(X$new_cases_per_million, .x)) %>%
+  bind_cols(X, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z %>%  glimpse()
+
+l_1 <- lm(Z$new_deaths_per_million ~ Z$new_cases_per_million + Z$weekly_hosp_admissions_per_million,data=Z)
+
+summary(l_1)
+```
+
+Use linear regression (`lm(.)`) to fit lagged regression models with $p$ varying from $0$ to $30$ (have a look at [Shumway and Stoffer](http://www.stat.ucla.edu/~frederic/221/W21/tsa4.pdf) to see how to do this).
+
+Compare the results for different values of $p$.
+
+```{r}
+# The Multiple R-squared is about 26. It's not a very great value.
+
+linear_model <- lm(Z$new_deaths_per_million ~ time(Z$new_cases_per_million + Z$weekly_hosp_admissions_per_million),na.action=NULL)
+
+summary(linear_model)
+```
+
+```{r}
+plot(Z$new_deaths_per_million)
+abline(linear_model) # add the fitted line
+```
+
+Assess the relevance of that modeling. Do you believe Gaussian linear modeling is relevant in that setting?
+
+About 26 percent of variations in the variable to be explained are explained by the explanatory variables. It's not very relevant. We can also see it on the graph.
+
+```{r}
+plot(linear_model, which = 2)
+```
+
+We can see that the Gaussian Linear Model assumptions are not satisfied because there are no alignments on the QQ-plot (between residual quantiles and theoretical quantiles).
+
+Fit one model for each wave (wave 1, wave 2, wave 3 (variant $\alpha$), waves 4-5 (variant $\delta$), waves 6-8 (variants $\omicron$)).
+
+```{r}
+#Wave 1
+start_date <- as_date("2020-03-20")
+end_date <- as_date("2020-04-20")
+Delta <- 25
+X_1 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_1 <- 1:Delta %>%
+  map_dfc(~ lag(X_1$new_cases_per_million, .x)) %>%
+  bind_cols(X_1, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_1 %>%  glimpse()
+
+l_2 <- lm(Z_1$new_deaths_per_million ~ Z_1$new_cases_per_million+Z_1$weekly_hosp_admissions_per_million,data=Z_1)
+
+summary(l_2)
+```
+
+```{r}
+#Wave 2
+start_date <- as_date("2020-06-01")
+end_date <- as_date("2020-12-01")
+Delta <- 25
+X_2 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_2 <- 1:Delta %>%
+  map_dfc(~ lag(X_2$new_cases_per_million, .x)) %>%
+  bind_cols(X_2, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_2 %>%  glimpse()
+
+l_3 <- lm(Z_2$new_deaths_per_million ~ Z_2$new_cases_per_million+Z_2$weekly_hosp_admissions_per_million,data=Z_2)
+
+summary(l_3)
+```
+
+```{r}
+#Wave 3
+start_date <- as_date("2020-12-02")
+end_date <- as_date("2021-03-01")
+Delta <- 25
+X_3<- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_3 <- 1:Delta %>%
+  map_dfc(~ lag(X_3$new_cases_per_million, .x)) %>%
+  bind_cols(X_3, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_3 %>%  glimpse()
+
+l_4 <- lm(Z_3$new_deaths_per_million ~ Z_3$new_cases_per_million+Z_3$weekly_hosp_admissions_per_million,data=Z_3)
+
+summary(l_4)
+```
+
+```{r}
+#Wave 4
+start_date <- as_date("2021-06-01")
+end_date <- as_date("2021-07-01")
+Delta <- 25
+X_4 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_4 <- 1:Delta %>%
+  map_dfc(~ lag(X_4$new_cases_per_million, .x)) %>%
+  bind_cols(X_4, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_4 %>%  glimpse()
+
+l_5 <- lm(Z_4$new_deaths_per_million ~ Z_4$new_cases_per_million+Z_4$weekly_hosp_admissions_per_million,data=Z_4)
+
+summary(l_5)
+```
+
+```{r}
+#Wave 5
+start_date <- as_date("2021-10-01")
+end_date <- as_date("2022-02-02")
+Delta <- 25
+X_5 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_5 <- 1:Delta %>%
+  map_dfc(~ lag(X_5$new_cases_per_million, .x)) %>%
+  bind_cols(X_5, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_5 %>%  glimpse()
+
+l_6 <- lm(Z_5$new_deaths_per_million ~ Z_5$new_cases_per_million+Z_5$weekly_hosp_admissions_per_million,data=Z_5)
+
+summary(l_6)
+```
+
+```{r}
+#Wave 6
+start_date <- as_date("2022-03-01")
+end_date <- as_date("2022-04-01")
+Delta <- 25
+X_6 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_6 <- 1:Delta %>%
+  map_dfc(~ lag(X_6$new_cases_per_million, .x)) %>%
+  bind_cols(X_6, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_6 %>%  glimpse()
+
+l_7 <- lm(Z_6$new_deaths_per_million ~ Z_6$new_cases_per_million+Z_6$weekly_hosp_admissions_per_million,data=Z_6)
+
+summary(l_7)
+```
+
+```{r}
+#Wave 7
+start_date <- as_date("2022-05-01")
+end_date <- as_date("2022-06-01")
+Delta <- 25
+X_7 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_7 <- 1:Delta %>%
+  map_dfc(~ lag(X_7$new_cases_per_million, .x)) %>%
+  bind_cols(X_7, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_7 %>%  glimpse()
+
+l_8 <- lm(Z_7$new_deaths_per_million ~ Z_7$new_cases_per_million+Z_7$weekly_hosp_admissions_per_million,data=Z_7)
+
+summary(l_8)
+```
+
+```{r}
+#Wave 8
+start_date <- as_date("2022-08-01")
+end_date <- as_date("2022-10-01")
+Delta <- 25
+X_8 <- fr_tb %>%
+  filter(date >= start_date) %>%
+  filter(date <= end_date) %>%
+  dplyr::select(new_deaths_per_million,new_cases_per_million, weekly_hosp_admissions_per_million)
+Z_8 <- 1:Delta %>%
+  map_dfc(~ lag(X_8$new_cases_per_million, .x)) %>%
+  bind_cols(X_8, .) %>%
+  relocate(date, .before = new_cases_per_million)
+Z_8 %>%  glimpse()
+
+l_9 <- lm(Z_8$new_deaths_per_million ~ Z_8$new_cases_per_million+Z_8$weekly_hosp_admissions_per_million,data=Z_8)
+
+summary(l_9)
+```
+
+Do you think one lagged regression model should fit all waves and all countries?
+
+No. Indeed, the countries do not experience the waves at the same time. In the regression models we did, we can see that models are not always relevant. It depends on the population of each country, the measures taken against the virus etc.
